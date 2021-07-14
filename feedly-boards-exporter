@@ -1,0 +1,71 @@
+#!/usr/bin/env ruby
+
+require "cgi"
+require "json"
+require "net/http"
+
+TOKEN = ENV["FEEDLY_TOKEN"]
+
+SERVER_ADDRESS = ENV["FEEDLY_SERVER"] || "https://cloud.feedly.com"
+
+if TOKEN.nil?
+  STDERR.puts "Missing $FEEDLY_TOKEN"
+  exit 1
+end
+
+def get(path, params = {})
+  params = params.map {|k, v| [k, CGI.escape(v)].join("=") }.join("&")
+  uri = URI([SERVER_ADDRESS, path, "?", params].join)
+  response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
+    request = Net::HTTP::Get.new(uri)
+    request["Authorization"] = "Bearer #{TOKEN}"
+    http.request request
+  end
+
+  if not response.kind_of?(Net::HTTPSuccess)
+    STDERR.puts "GET #{path}: #{response.code}"
+    STDERR.print response.body
+  end
+
+  if response["content-type"].start_with?("application/json")
+    JSON.parse(response.body)
+  else
+    response.body
+  end
+end
+
+# Get existing boards
+
+get("/v3/boards").sort_by {|b| b["id"] }.each_with_index do |board, index|
+  STDERR.print "Get items in '#{board["label"]}': "
+
+  filename = "#{index}-#{board["label"].gsub(/\W+/, "")}.json"
+
+  File.open(filename, "w") do |output|
+    board_id = board["id"]
+    continuation = nil
+    found_items = 0
+    loop do
+      params = {
+        streamId: board_id,
+        count: "500"
+      }
+
+      # Get items in the board
+      params[:continuation] = continuation if continuation
+      resp = get("/v3/streams/contents", params)
+
+      found_items += resp["items"].size
+      STDERR.print found_items, " "
+
+      # Write one item per line.
+      resp["items"].each do |item|
+        output.puts(item.to_json)
+      end
+
+      continuation = resp["continuation"]
+      break if continuation.nil?
+    end
+    puts
+  end
+end
